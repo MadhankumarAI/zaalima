@@ -4,17 +4,77 @@ import matplotlib.pyplot as plt
 from pymongo import MongoClient
 from datetime import datetime
 import seaborn as sns
+import subprocess
+import os
+import threading
+import glob
 
 # MongoDB config
-MONGO_URI = "mongodb+srv://MadhanKumarR:mypassword@cluster0.kgklnih.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_URI = "mongodb+srv://MadhanKumarR:{remove the flower braces and add the password here}@cluster0.kgklnih.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_URI)
-db = client["news_project"]
-collection = db["news_cleaned"]
+db = client["newsDB"]
+collection = db["headlines"]
+
+# Function to run the pipeline manually 
+def run_pipeline_manually():
+    with st.spinner('Running news pipeline... This may take a minute.'):
+        try:
+           # This uses the same environment as Streamlit is running in
+            result = subprocess.run([os.sys.executable, "daily_pipeline.py"],
+                                    capture_output=True,
+                                    text=True)
+
+            if result.returncode == 0:
+                st.success("Pipeline executed successfully! Data refreshed.")
+            else:
+                st.error(f"Pipeline failed: {result.stderr}")
+        except Exception as e:
+            st.error(f"Error executing pipeline: {str(e)}")
+
+# Function to start the scheduler in a separate thread
+def start_scheduler_thread():
+    import subprocess
+    subprocess.Popen(["python", "scheduler.py"])
+
+# Start scheduler when app starts (if not already running)
+def initialize_scheduler():
+    import psutil
+    
+    # Check if scheduler is already running
+    scheduler_running = False
+    for process in psutil.process_iter(['pid', 'name', 'cmdline']):
+        if 'python' in process.info['name'].lower() and 'scheduler.py' in ' '.join(process.info.get('cmdline', [])):
+            scheduler_running = True
+            break
+    
+    if not scheduler_running:
+        thread = threading.Thread(target=start_scheduler_thread)
+        thread.daemon = True
+        thread.start()
+        st.session_state.scheduler_started = True
+
+# Initialize scheduler on first run
+if 'scheduler_started' not in st.session_state:
+    initialize_scheduler()
+
+# Function to get the latest CSV file
+def get_latest_csv():
+    # Check data directory first
+    data_dir = "data/cleaned"
+    if os.path.exists(data_dir):
+        csv_files = glob.glob(os.path.join(data_dir, "news_cleaned_*.csv"))
+        if csv_files:
+            return max(csv_files, key=os.path.getctime)  # Return the most recently created file
+    
+    # Check root directory as fallback
+    csv_files = glob.glob("news_cleaned*.csv")
+    if csv_files:
+        return max(csv_files, key=os.path.getctime)
+    
+    return None
 
 # Streamlit page config
 st.set_page_config(page_title="📰 News Sentiment Dashboard", layout="wide")
-
-# Custom CSS with improved styling and responsive design
 st.markdown("""
     <style>
         /* Base styling */
@@ -31,8 +91,6 @@ st.markdown("""
             max-width: 1200px;
             margin: 0 auto;
         }
-        
-    
         
         .dashboard-title {
             color: white;
@@ -287,7 +345,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Sidebar filters with improved styling
+# Sidebar filters with improved styling and manual refresh button is added over here -----------//-
 with st.sidebar:
     st.markdown('<div class="sidebar-header">📅 Filter Options</div>', unsafe_allow_html=True)
     
@@ -300,35 +358,94 @@ with st.sidebar:
         st.markdown('<div class="filter-section">', unsafe_allow_html=True)
         reset_button = st.button("🔄 Reset Filters", use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
-
-# Load data from MongoDB
-if selected_date:
-    start_dt = datetime.combine(selected_date, datetime.min.time())
-    end_dt = datetime.combine(selected_date, datetime.max.time())
-    query = {"publishedAt": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}}
-else:
-    query = {}
-
-docs = list(collection.find(query))
-df = pd.DataFrame(docs)
-
-# If no articles are found from MongoDB, load from CSV
-if df.empty:
     
-    # Load the CSV file as a fallback
-    csv_file_path = "news_cleaned.csv"
-    df = pd.read_csv(csv_file_path)
+    # Add manual refresh section
+    with st.container():
+        st.markdown('<div class="filter-section">', unsafe_allow_html=True)
+        st.markdown("### 🔄 Data Refresh")
+        st.write("The news data is automatically updated daily at 6:00 AM.")
+        refresh_button = st.button("📊 Refresh Data Now", use_container_width=True)
+        
+        if refresh_button:
+            run_pipeline_manually()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Display last update time
+    with st.container():
+        st.markdown('<div class="filter-section">', unsafe_allow_html=True)
+        
+        # Find most recent article date
+        most_recent = collection.find_one(sort=[("publishedAt", -1)])
+        if most_recent and 'publishedAt' in most_recent:
+            try:
+                last_update = datetime.fromisoformat(most_recent['publishedAt'].replace('Z', '+00:00'))
+                st.info(f"Last data update: {last_update.strftime('%B %d, %Y at %H:%M')}")
+            except:
+                st.info("Data available. Last update time unknown.")
+        else:
+            st.info("No data available. Click 'Refresh Data Now' to fetch news.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# If reset button is clicked, reload all
+# Load data from MongoDB with fallback to CSV
+try:
+    # First try to get data from MongoDB based on filters
+    if selected_date:
+        start_dt = datetime.combine(selected_date, datetime.min.time())
+        end_dt = datetime.combine(selected_date, datetime.max.time())
+        query = {"publishedAt": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}}
+    else:
+        query = {}
+    
+    docs = list(collection.find(query).limit(3))
+    
+    # Check if we got data from MongoDB
+    if docs:
+        st.success("Data loaded from MongoDB successfully.")
+        df = pd.DataFrame(docs)
+        data_source = "MongoDB"
+    else:
+        # If no data from MongoDB, try to load from CSV
+        st.warning("No data found in MongoDB. Switching to CSV data source.")
+        latest_csv = get_latest_csv()
+        
+        if latest_csv:
+            st.info(f"Loading data from: {os.path.basename(latest_csv)}")
+            df = pd.read_csv(latest_csv)
+            data_source = f"CSV file: {os.path.basename(latest_csv)}"
+            
+            # If date filtering is applied, filter the CSV data accordingly
+            if selected_date:
+                date_str = selected_date.strftime('%Y-%m-%d')
+                df = df[df['publishedAt'].str.startswith(date_str)]
+        else:
+            st.error("No CSV data files found. Please run the pipeline to collect news data.")
+            df = pd.DataFrame()  # Empty dataframe
+            data_source = "None"
+            
+except Exception as e:
+    st.error(f"Error loading data: {str(e)}")
+    df = pd.DataFrame()  # Empty dataframe as fallback
+    data_source = "Error"
+
+# If reset button is clicked, reload all data
 if reset_button:
-    df = pd.DataFrame(list(collection.find({})))  # Reload from MongoDB
+    try:
+        df = pd.DataFrame(list(collection.find({})))  # Try to reload from MongoDB
+        data_source = "MongoDB (reset)"
+        if df.empty:
+            # If MongoDB is empty, fall back to CSV
+            latest_csv = get_latest_csv()
+            if latest_csv:
+                df = pd.read_csv(latest_csv)
+                data_source = f"CSV file (reset): {os.path.basename(latest_csv)}"
+    except Exception as e:
+        st.error(f"Error resetting data: {str(e)}")
     selected_date = None
 
-# Filtering logic for articles based on date
-if selected_date:
-    filtered_articles = [article for article in df.to_dict(orient='records') if article['publishedAt'][:10] == selected_date.strftime('%Y-%m-%d')]
-else:
-    filtered_articles = df.to_dict(orient='records')
+# Convert DataFrame to list of article dictionaries
+filtered_articles = df.to_dict(orient='records') if not df.empty else []
 
 # Dashboard Header
 st.markdown('<div class="dashboard-header">', unsafe_allow_html=True)
@@ -336,7 +453,7 @@ if selected_date:
     st.markdown(f'<div class="dashboard-title">📰 News from {selected_date.strftime("%B %d, %Y")}</div>', unsafe_allow_html=True)
 else:
     st.markdown('<div class="dashboard-title">📰 Latest News Dashboard</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="dashboard-subtitle">Displaying {len(filtered_articles)} articles with sentiment analysis</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="dashboard-subtitle">Displaying {len(filtered_articles)} articles with sentiment analysis (Source: {data_source})</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 # Sentiment data
@@ -344,7 +461,7 @@ sentiment_emojis = {"positive": "😊", "negative": "😞", "neutral": "😐"}
 
 # No articles message
 if not filtered_articles:
-    st.warning("No articles found for the selected date.")
+    st.warning("No articles found for the selected criteria. Try changing your filters or refreshing the data.")
 else:
     # Create row container
     st.markdown('<div class="row">', unsafe_allow_html=True)
@@ -356,7 +473,8 @@ else:
             article_date = datetime.fromisoformat(article['publishedAt'].replace('Z', '+00:00'))
             formatted_date = article_date.strftime("%b %d, %Y • %I:%M %p")
         except:
-            formatted_date = article['publishedAt']
+            # Fallback if date parsing fails
+            formatted_date = article.get('publishedAt', 'Unknown date')
         
         # Get topic
         topic = article.get('topic', 'General')

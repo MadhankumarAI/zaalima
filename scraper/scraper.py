@@ -1,15 +1,14 @@
-from dotenv import load_dotenv
+
 import os
 import requests
 import csv
 import time
 from datetime import datetime
 
-# Load environment variables from the .env file
-load_dotenv()
 
-# Get the API key from the environment variable
-API_KEY = os.getenv("API_KEY")
+
+
+API_KEY = 'add the key in here'
 
 # Check if the key was loaded properly
 if not API_KEY:
